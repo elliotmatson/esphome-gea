@@ -255,6 +255,7 @@ class GEAComponent : public uart::UARTDevice, public Component {
   uint32_t get_tx_retries() const { return tx_retries_; }
   uint32_t get_dropped_requests() const { return dropped_requests_; }
   uint32_t get_tx_collisions() const { return tx_collisions_; }
+  uint32_t get_rx_frame_timeouts() const { return rx_frame_timeouts_; }
 
   // ---- on_erd_change triggers (registered from Python codegen) ------------
   void register_erd_change_trigger(ErdChangeTrigger *trigger) { erd_change_triggers_.push_back(trigger); }
