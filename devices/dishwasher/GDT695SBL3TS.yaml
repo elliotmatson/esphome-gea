@@ -85,7 +85,6 @@ gea:
   id: gea_hub
   uart_id: uart_gea
   protocol: gea2
-  src_address: 0xE4      # the address this config was tested with; the 0xBB default is untested here
   dest_address: 0x40     # the dishwasher; confirmed from the power-up announce frame
   # Default is 2s. 26 ERDs are polled, so 2s means ~52 s per full refresh;
   # 100ms brings that to ~2.6 s. Raise it if frame timeouts become frequent.
