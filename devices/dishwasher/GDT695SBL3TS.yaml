@@ -11,11 +11,11 @@
 #   0x321A-0x3221, 0x3087, 0x3084, 0x3107, 0x310A and 0x310B are all absent. The board answers at 0x40.
 # - ERDs confirmed by a full 2445-ERD GEA2 discovery sweep; 44 responded. Everything declared below exists.
 # - Every panel control (cycle, wash temp, zone, steam, heated dry, bottle jets, panel lock, delay start) is
-#   bit-packed into ERD 0x3007 userConfiguration, which IS writable. Fields share bytes, so the controls go
+#   bit-packed into ERD 0x3007 User Settings, which IS writable. Fields share bytes, so the controls go
 #   through a bit-level read-modify-write script (uc_write_bits) instead of byte-granular gea entities.
+#   Field names and positions below are GE's, from erd-definitions/appliance_api_erd_definitions.json.
 # - Native Fahrenheit for water temperature; 75 °F is the "unknown" sentinel. Turbidity's sentinel is 1000.
-# - Start/stop (ERD 0x3000 cycleStatus) is not implemented: the payload layout is inferred from GE's SDK,
-#   not verified, and there is no remote-start interlock on GEA2. See the note near the end.
+# - No start/stop: ERD 0x3000 Cycle Status is read-only in GE's definitions. See the note near the end.
 
 esphome:
   name: ge-dishwasher
@@ -337,7 +337,7 @@ sensor:
       if (pct > 100.0f) pct = 100.0f;
       return pct;
 
-  # userConfiguration (0x3007) bytes, internal: feed the panel controls below
+  # User Settings (0x3007) bytes, internal: feed the panel controls below
   - platform: gea
     gea_id: gea_hub
     id: uc_b0
@@ -478,18 +478,23 @@ text_sensor:
     entity_category: diagnostic
     icon: mdi:identifier
 
-  # userConfiguration (0x3007) bit map, confirmed empirically against 14 panel
-  # changes (each moved exactly one field). Idle baseline 0x00 85 25.
-  #   byte0 b0-3 delay hours      VERIFIED (1h -> 1, 12h -> 12)
-  #   byte0 b4-5 zone             VERIFIED (0 both, 1 lower, 2 upper)
-  #   byte1 b0   steam            inferred from SDK (panel button dead)
-  #   byte1 b1   UI locked        inferred from SDK (panel button dead)
-  #   byte1 b2-3 dry option       VERIFIED (0 off, 1 heated dry)
-  #   byte1 b4-6 wash temp        VERIFIED (0 normal, 1 boost, 2 sanitize)
-  #   byte1 b7   rinse aid enable inferred from SDK
-  #   byte2 b0   bottle jets      VERIFIED
-  #   byte2 b1-4 selected cycle   VERIFIED by write (0 Auto/1 Heavy/2 Normal/3 Light)
-  #   byte2 b5   leak detect      inferred from SDK
+  # User Settings (0x3007) bit map. Names and positions are GE's; "panel" means
+  # the field was also confirmed against 14 panel changes on this dishwasher
+  # (each moved exactly one field). Idle baseline 0x00 85 25.
+  #   byte0 b0-3 Delay Start        panel (1h -> 1, 12h -> 12)
+  #   byte0 b4-5 Zone Selection     panel (0 both, 1 lower, 2 upper)
+  #   byte0 b6   Demo Mode          not exposed
+  #   byte0 b7   Mute               not exposed
+  #   byte1 b0   Steam              GE only (panel button dead)
+  #   byte1 b1   Control Locked     GE only (panel button dead)
+  #   byte1 b2-3 Dry Setting        panel (0 off, 1 heated dry)
+  #   byte1 b4-6 Wash Temperature   panel (0 normal, 1 boost, 2 sanitize)
+  #   byte1 b7   Rinse Aid Option   GE only, not exposed
+  #   byte2 b0   Bottle Blast       panel
+  #   byte2 b1-4 Selected Cycle     confirmed by write (0 Auto/1 Heavy/2 Normal/3 Light)
+  #   byte2 b5   Leak Pan Status    GE only, not exposed (no description from GE)
+  #   byte2 b6   Door Wakeup        not exposed
+  #   byte2 b7   Wifi Enabled       not exposed
   - platform: gea
     gea_id: gea_hub
     name: "RAW User Configuration"
@@ -507,14 +512,14 @@ text_sensor:
     icon: mdi:play-circle
 
 # =============================================================================
-# PANEL CONTROLS — all live inside ERD 0x3007 (userConfiguration)
+# PANEL CONTROLS — all live inside ERD 0x3007 (User Settings)
 #
 # Fields share bytes (delay + zone in byte 0; steam, dry and wash temp in
 # byte 1), so a byte-granular write would clobber siblings. uc_write_bits does
 # a BIT-level read-modify-write: it takes the cached 0x3007 payload, rewrites
 # only the masked bits, primes the cache so the next poll doesn't fight it, and
-# writes all 3 bytes back. Bits no control names (rinse aid enable, leak
-# detect) are preserved untouched.
+# writes all 3 bytes back. Fields no control covers (Demo Mode, Mute, Rinse
+# Aid Option, Leak Pan Status, Door Wakeup, Wifi Enabled) are preserved untouched.
 #
 # Writes are skipped (with a warning) until 0x3007 has been read once, since
 # unseen bits can't be preserved. Expect one skipped write right after boot.
@@ -660,9 +665,9 @@ switch:
     turn_off_action:
       - script.execute: {id: uc_write_bits, byte_idx: 1, mask: 0x0C, shift: 2, value: 0}
 
-  # byte 1, bit 1. Inferred from GE's SDK layout, not verified against the
-  # panel (that button is dead). Watch byte 1 of RAW User Configuration when
-  # toggling; if the bit moves and the panel locks, it is correct.
+  # byte 1, bit 1 — GE's "Control Locked". Not confirmed on the panel (that
+  # button is dead). Watch byte 1 of RAW User Configuration when toggling; if
+  # the bit moves and the panel locks, it works.
   - platform: template
     name: "Panel Lock"
     icon: mdi:lock
@@ -717,18 +722,17 @@ number:
 # =============================================================================
 # START / STOP — NOT IMPLEMENTED
 #
-# Starting a cycle lives in ERD 0x3000 (cycleStatus), not 0x3007. GE's SDK
-# describes the payload as cycleRunning, activeCycle, activeCycleStep,
-# stepsExecuted, stepsEstimated — most likely one byte each, byte0 =
-# cycleRunning (0/1). That is an inference, never verified on this appliance.
+# ERD 0x3000 Cycle Status is READ-ONLY in GE's definitions (read, publish,
+# subscribe — no write), so it reports a cycle rather than starting one. GE's
+# layout, one byte each: Cycle Running, Active Cycle, Active Cycle Step, Steps
+# Executed, Steps Estimated, then a bitfield of options allowed for the running
+# cycle (b0 Heated Dry, b1 Boost, b2 Sani, b3 Wash Zones, b4 Steam, b5 Bottle
+# Blast). On this dishwasher it read 0x01 34 02 3B 3A 3F while idle, so Cycle
+# Running is not a simple 0/1 run flag either.
 #
-# To confirm, capture RAW Cycle Status idle (door shut, cycle selected) and
-# mid-cycle after starting at the panel: byte0 should go 0 -> 1 and byte1
-# should match the cycle index above. A start write would then follow the same
-# get_cached_erd / prime_erd_cache / write_erd pattern as uc_write_bits.
-#
-# Think hard before exposing it: there is no remote-start interlock on GEA2,
-# so nothing stops a write from running the machine with the door unlatched.
+# No other ERD this dishwasher answers to starts a cycle. Even if one turned
+# up, there is no remote-start interlock on GEA2, so nothing would stop a
+# write from running the machine with the door unlatched.
 # =============================================================================
 
 # =============================================================================
