@@ -1,10 +1,10 @@
 # ESPHome config for a GE dishwasher via GEA2 — read AND write
 # Appliance: GE GDT695SBL3TS
-# Hardware: Seeed XIAO ESP32-C3 on a custom carrier — AO3400 (Q1) + AO3401 (Q2) high-side driver on the single
-#   COMM line, R2 = 1k, R3 = 100R, status LED, WS2812 toe-kick strip
+# Hardware: FirstBuild "GE Appliances Home Assistant Adapter" (Seeed XIAO ESP32-C3 on a carrier that routes the
+#   appliance jack's serial line to GPIO9/GPIO10 and powers the board from the jack)
 # Framework: ESP-IDF
 # Baud rate: 19200 (GEA2, half-duplex)
-# TX = GPIO5 (D3), RX = GPIO10 (D10) — same mapping as the mulcmu adapter
+# TX = GPIO9, RX = GPIO10
 #
 # Findings worth not rediscovering:
 # - This dishwasher is GEA2, not GEA3. None of the PDP715SYV0FS (GEA3) control ERDs exist here: 0x3204,
@@ -13,11 +13,9 @@
 # - Every panel control (cycle, wash temp, zone, steam, heated dry, bottle jets, panel lock, delay start) is
 #   bit-packed into ERD 0x3007 userConfiguration, which IS writable. Fields share bytes, so the controls go
 #   through a bit-level read-modify-write script (uc_write_bits) instead of byte-granular gea entities.
-# - The bus idles LOW and each node sources it HIGH. The MOSFET interface above is non-inverting end to end,
-#   so polarity is undone in the ESP32's UART peripheral (see on_boot). Don't also invert in hardware.
 # - Native Fahrenheit for water temperature; 75 °F is the "unknown" sentinel. Turbidity's sentinel is 1000.
-# - Start/stop (ERD 0x3000 cycleStatus) is left as a disabled scaffold at the bottom: the payload layout is
-#   inferred from GE's SDK, not verified, and there is no remote-start interlock on GEA2.
+# - Start/stop (ERD 0x3000 cycleStatus) is not implemented: the payload layout is inferred from GE's SDK,
+#   not verified, and there is no remote-start interlock on GEA2. See the note near the end.
 
 esphome:
   name: ge-dishwasher
@@ -26,23 +24,44 @@ esphome:
     name: GE.GDT695SBL3TS
     version: "1.0.0"
 
-  # Bus idles low; hardware is non-inverting; so invert in the peripheral.
-  # UART_NUM_0 is free because the logger is on USB_SERIAL_JTAG.
-  #
-  # Priority 900: uart: sets up at BUS (1000), so this runs right after the
-  # driver installs. Until it runs, TX idles high and Q2 clamps the bus — at
-  # the default -100 that was ~1 s of jamming the appliance's bus every boot.
-  on_boot:
-    priority: 900
-    then:
-      - lambda: |-
-          uart_set_line_inverse(UART_NUM_0,
-                                UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV);
-
 esp32:
   board: seeed_xiao_esp32c3
   framework:
     type: esp-idf
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  min_auth_mode: WPA2
+  # ESP-IDF defaults to light sleep between beacons, which adds latency spikes
+  # to the main loop. Those spikes can truncate a GEA2 frame.
+  power_save_mode: NONE
+  ap:
+    ssid: "ge-dishwasher fallback"
+    password: !secret ap_password
+  on_connect:
+    - output.turn_on: led_wifi
+  on_disconnect:
+    - output.turn_off: led_wifi
+
+captive_portal:
+
+# INFO, not DEBUG: heavy logging over WiFi stalls the main loop and can
+# overrun the UART RX buffer mid-frame.
+logger:
+  level: INFO
+
+api:
+  encryption:
+    key: !secret api_key
+  on_client_connected:
+    - output.turn_on: led_ha
+  on_client_disconnected:
+    - output.turn_off: led_ha
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
 
 external_components:
   - source:
@@ -50,215 +69,30 @@ external_components:
       path: ../../components
     components: [gea]
 
-# Logging on native USB, NOT over the API. Log writes over WiFi block the main
-# loop unpredictably, overrun the UART RX FIFO and truncate frames.
-logger:
-  level: INFO
-  hardware_uart: USB_SERIAL_JTAG
-
-api:
-  encryption:
-    key: !secret api_key
-
-ota:
-  - platform: esphome
-    password: !secret ota_password
-
-wifi:
-  ssid: !secret wifi_ssid
-  password: !secret wifi_password
-  # ESP-IDF defaults to light sleep between beacons, which adds latency spikes
-  # to the main loop. Those spikes are what truncate a GEA frame.
-  power_save_mode: NONE
-  # The toe-kick cavity is a steel box. If RSSI is bad, use the XIAO ESP32-C3
-  # u.FL variant with the antenna routed outside the kick panel.
-  ap:
-    ssid: "ge-dishwasher fallback"
-    password: !secret ap_password
-
-captive_portal:
-
-# GPIO8 is an ESP32-C3 strapping pin (must read HIGH at boot). Driving it as a
-# status LED is fine, but if the board ever fails to boot, check that nothing
-# holds it low during reset.
 status_led:
-  pin:
-    number: GPIO8
-    ignore_strapping_warning: true
+  pin: GPIO2
 
-# -----------------------------------------------------------------------------
-# UART — GEA2, half-duplex, 19200
-#
-# Neither pin is a strapping pin. Avoid GPIO2 / GPIO8 / GPIO9 (strapping; GPIO9
-# is also BOOT). GPIO20/21 are UART0's default pins but are free here because
-# the logger is on USB_SERIAL_JTAG — GPIO21 drives the LED strip.
-# -----------------------------------------------------------------------------
+output:
+  - platform: gpio
+    pin: GPIO3
+    id: led_ha
+  - platform: gpio
+    pin: GPIO4
+    id: led_wifi
+
 uart:
   id: uart_gea
-  tx_pin: GPIO5
+  tx_pin: GPIO9
   rx_pin: GPIO10
   baud_rate: 19200
-  data_bits: 8
-  stop_bits: 1
-  parity: NONE
   rx_buffer_size: 2048   # headroom if the main loop stalls mid-frame
 
 gea:
   id: gea_hub
   uart_id: uart_gea
   protocol: gea2
-  src_address: 0xE4
   dest_address: 0x40     # confirmed from the power-up announce frame
   poll_interval: 100ms   # raise to 250ms if frame timeouts become frequent
-  gea2_discovery: false  # sweep done; set true to re-run it
-  erd_lookup: false      # saves ~75 KB and per-packet work
-
-# =============================================================================
-# LED STRIP — doubles as a GEA bus monitor
-#
-# "GEA Bus Status" turns the toe kick into a live bus display:
-#   solid green  = bus connected       solid red = bus disconnected
-#   white pixel chasing                = RX bytes arriving (bus activity)
-#   whole strip amber flash            = RX frame timeout (recovery kicking in)
-#   whole strip magenta flash          = TX collision
-# GREEN STRIP, FROZEN CHASE PIXEL means bytes have stopped but the 30 s
-# connectivity window has not expired yet — a stall caught in the act.
-#
-# "Dishwasher Cycle" shows the appliance instead: colour = current cycle step,
-# fill = progress, breathing green = finished, amber drift = delay start.
-#
-# Effects only render while the light is ON, scaled by its brightness. Colours
-# are full-scale because the light applies gamma_correct 2.8: perceived output
-# is ~(v/255)^2.8, so anything much below 255 falls away fast.
-# =============================================================================
-light:
-  - platform: esp32_rmt_led_strip
-    pin: GPIO21
-    num_leds: 17
-    chipset: WS2812
-    channel_colors: GRB
-    name: "Toe Kick"
-    id: strip
-    default_transition_length: 0.5s
-    restore_mode: RESTORE_DEFAULT_OFF
-    effects:
-      - addressable_lambda:
-          name: "GEA Bus Status"
-          update_interval: 50ms
-          lambda: |-
-            static uint32_t last_bytes = 0;
-            static uint32_t last_tmo = 0;
-            static uint32_t last_col = 0;
-            static int head = 0;
-            static int alert = 0;
-            static Color alert_color = Color(0, 0, 0);
-
-            int n = it.size();
-            bool ok = id(gea_hub).is_bus_connected();
-            uint32_t bytes = id(gea_hub).get_rx_bytes();
-            uint32_t tmo   = id(gea_hub).get_rx_frame_timeouts();
-            uint32_t col   = id(gea_hub).get_tx_collisions();
-
-            if (tmo != last_tmo) { last_tmo = tmo; alert = 12; alert_color = Color(255, 150, 0); }
-            if (col != last_col) { last_col = col; alert = 8;  alert_color = Color(230, 0, 200); }
-            if (bytes != last_bytes) { last_bytes = bytes; head = (head + 1) % n; }
-
-            Color base = ok ? Color(0, 255, 40) : Color(255, 0, 0);
-            if (alert > 0) { base = alert_color; alert--; }
-
-            for (int i = 0; i < n; i++) it[i] = base;
-            // White, not a brighter green — it has to out-contrast a
-            // full-brightness green base.
-            if (ok && alert == 0) it[head] = Color(255, 255, 255);
-
-      - addressable_lambda:
-          name: "Dishwasher Cycle"
-          update_interval: 30ms
-          lambda: |-
-            static uint16_t tick = 0;
-            static uint32_t subpos = 0;          // sweep position, 1/16 px units
-
-            int n = it.size();
-            if (n <= 0) return;
-            tick++;
-
-            // Integer triangle wave 0.0-1.0 (~7 s period), avoids <cmath>.
-            uint8_t p = (tick >> 1) & 0x7F;
-            float breathe = (p < 64 ? p : 127 - p) / 63.0f;
-
-            std::string mode = id(dw_op_mode).has_state() ? id(dw_op_mode).state : std::string("");
-            std::string step = id(dw_cycle_step).has_state() ? id(dw_cycle_step).state : std::string("");
-
-            // Finished: whole strip breathing green until someone unloads it.
-            if (id(dw_cycle_complete).state || mode == "End of Cycle") {
-              float b = 0.55f + 0.45f * breathe;
-              for (int i = 0; i < n; i++) it[i] = Color(0, (int)(255 * b), (int)(60 * b));
-              return;
-            }
-
-            // Not running: amber drift while a delay start counts down, else dark.
-            if (mode != "Running" && mode != "Paused") {
-              if (mode == "Delay Start" || mode == "Delay Paused") {
-                float b = 0.20f + 0.30f * breathe;
-                for (int i = 0; i < n; i++) it[i] = Color((int)(255 * b), (int)(130 * b), 0);
-              } else {
-                for (int i = 0; i < n; i++) it[i] = Color(0, 0, 0);
-              }
-              return;
-            }
-
-            // Running / paused.
-            Color c = Color(0, 120, 255);                                    // wash blue
-            if (step.find("Prewash") != std::string::npos || step == "Sensing")
-              c = Color(0, 255, 200);                                        // pre/sense teal
-            else if (step.find("Rins") != std::string::npos)
-              c = Color(0, 200, 255);                                        // rinse cyan
-            else if (step.find("Dry") != std::string::npos)
-              c = Color(255, 140, 0);                                        // dry amber
-            else if (step.find("Sanitiz") != std::string::npos)
-              c = Color(255, 255, 255);                                      // sanitize white
-
-            float pct = id(dw_progress).has_state() ? id(dw_progress).state : 0.0f;
-            if (pct < 0.0f) pct = 0.0f;
-            if (pct > 100.0f) pct = 100.0f;
-
-            // At least two lit so a running cycle is always visible at 0%.
-            int lit = (int)((pct / 100.0f) * n + 0.5f);
-            if (lit < 2) lit = 2;
-            if (lit > n) lit = n;
-
-            // Paused holds steady and breathes; the sweep stops, so a paused
-            // machine reads as "stopped" rather than "nearly done".
-            bool running = (mode == "Running");
-            float dim = running ? 1.0f : (0.30f + 0.40f * breathe);
-
-            // A highlight travels along the filled section, tracked in
-            // 1/16-pixel units so it lands between pixels and interpolates
-            // across neighbours. 3/16 px per 30 ms frame = ~6 px/s.
-            int spanq = (lit + 6) * 16;
-            subpos += 3;
-            if (spanq > 0) subpos %= (uint32_t) spanq;
-            float head = (float)(n - 1) + 3.0f - (subpos / 16.0f);
-
-            // Strip is wired right-to-left, so fill from the high index down.
-            // Backdrop 0.33 (~4.7% perceived after gamma 2.8; don't go below
-            // ~0.30). Lit pixels idle at 0.70 and the highlight lifts to 1.00.
-            for (int i = 0; i < n; i++) {
-              float k;
-              if (i >= n - lit) {
-                if (running) {
-                  float d = (float) i - head;
-                  if (d < 0.0f) d = -d;
-                  k = (d < 3.0f) ? (0.70f + 0.30f * (1.0f - d / 3.0f)) : 0.70f;
-                } else {
-                  k = 1.0f;
-                }
-              } else {
-                k = 0.33f;
-              }
-              k *= dim;
-              it[i] = Color((int)(c.r * k), (int)(c.g * k), (int)(c.b * k));
-            }
 
 # -----------------------------------------------------------------------------
 # Binary sensors
