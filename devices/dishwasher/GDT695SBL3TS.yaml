@@ -33,9 +33,6 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
   min_auth_mode: WPA2
-  # ESP-IDF defaults to light sleep between beacons, which adds latency spikes
-  # to the main loop. Those spikes can truncate a GEA2 frame.
-  power_save_mode: NONE
   ap:
     ssid: "ge-dishwasher fallback"
     password: !secret ap_password
@@ -46,10 +43,8 @@ wifi:
 
 captive_portal:
 
-# INFO, not DEBUG: heavy logging over WiFi stalls the main loop and can
-# overrun the UART RX buffer mid-frame.
 logger:
-  level: INFO
+  level: DEBUG
 
 api:
   encryption:
@@ -91,8 +86,11 @@ gea:
   id: gea_hub
   uart_id: uart_gea
   protocol: gea2
-  dest_address: 0x40     # confirmed from the power-up announce frame
-  poll_interval: 100ms   # raise to 250ms if frame timeouts become frequent
+  src_address: 0xE4      # the address GE's own WiFi module uses; verified on this dishwasher
+  dest_address: 0x40     # the dishwasher; confirmed from the power-up announce frame
+  # Default is 2s. 26 ERDs are polled, so 2s means ~52 s per full refresh;
+  # 100ms brings that to ~2.6 s. Raise it if frame timeouts become frequent.
+  poll_interval: 100ms
 
 # -----------------------------------------------------------------------------
 # Binary sensors
