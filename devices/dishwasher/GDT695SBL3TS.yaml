@@ -513,8 +513,8 @@ text_sensor:
 # byte 1), so a byte-granular write would clobber siblings. uc_write_bits does
 # a BIT-level read-modify-write: it takes the cached 0x3007 payload, rewrites
 # only the masked bits, primes the cache so the next poll doesn't fight it, and
-# writes all 3 bytes back. Bits no control names (UI lock, rinse aid enable,
-# leak detect) are preserved untouched.
+# writes all 3 bytes back. Bits no control names (rinse aid enable, leak
+# detect) are preserved untouched.
 #
 # Writes are skipped (with a warning) until 0x3007 has been read once, since
 # unseen bits can't be preserved. Expect one skipped write right after boot.
